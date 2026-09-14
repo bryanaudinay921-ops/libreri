@@ -63,13 +63,15 @@ function Library.new(config)
 	self.Theme = Theme
 	self._tabs = {}
 	self._topWidgets = {}
+	self._baseWidth = config.Width or 1000
+	self._baseHeight = config.Height or 620
 
 	local playerGui = player:WaitForChild("PlayerGui")
 
 	local gui = new("ScreenGui", {
 		Name = config.Name or "ZiniroxUI",
 		ResetOnSpawn = false,
-		IgnoreGuiInset = true,
+		IgnoreGuiInset = false, -- respecte l'encoche / la barre de statut sur mobile
 		DisplayOrder = 50,
 	}, playerGui)
 	self.Gui = gui
@@ -96,9 +98,13 @@ function Library.new(config)
 	self.Main = main
 	self._openSize = main.Size
 
+	-- UIScale unique qui gère à la fois l'animation d'ouverture/fermeture
+	-- ET l'adaptation à la taille de l'écran (PC, tablette, mobile).
 	local scale = new("UIScale", {Scale = 0.94}, main)
-	tween(scale, TweenInfo.new(0.55, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {Scale = 1})
 	self.Scale = scale
+	self._animScale = 0.94
+	self._responsiveScale = self:_computeResponsiveFactor()
+	scale.Scale = self._animScale * self._responsiveScale
 
 	-- Barre du haut
 	local top = new("Frame", {
@@ -195,8 +201,72 @@ function Library.new(config)
 	self._minimized = false
 	self._dragging = false
 	self:_setupDrag()
+	self:_setupResponsive()
+
+	-- Animation d'ouverture (respecte le facteur d'adaptation à l'écran)
+	self:_setAnimScale(1, TweenInfo.new(0.55, Enum.EasingStyle.Quint, Enum.EasingDirection.Out))
 
 	return self
+end
+
+--============================================================
+-- Adaptation à la taille de l'écran (PC / tablette / mobile)
+--============================================================
+
+-- Calcule le facteur d'échelle pour que la fenêtre (conçue pour
+-- _baseWidth x _baseHeight) tienne toujours dans l'écran de l'appareil,
+-- qu'il s'agisse d'un PC, d'une tablette ou d'un téléphone.
+function Library:_computeResponsiveFactor()
+	local camera = workspace.CurrentCamera
+	local viewport = (camera and camera.ViewportSize) or Vector2.new(1280, 720)
+	local margin = 32 -- marge de sécurité de chaque côté
+
+	local factor = math.min(
+		(viewport.X - margin * 2) / self._baseWidth,
+		(viewport.Y - margin * 2) / self._baseHeight,
+		1 -- ne jamais agrandir au-delà de la taille de conception sur un grand écran
+	)
+
+	return math.clamp(factor, 0.45, 1)
+end
+
+-- Applique l'échelle "logique" (0.94 à l'ouverture, 1 une fois ouvert,
+-- 0.88 à la fermeture) combinée au facteur d'adaptation à l'écran.
+function Library:_setAnimScale(target, tweenInfo)
+	self._animScale = target
+	local final = target * self._responsiveScale
+	if tweenInfo then
+		tween(self.Scale, tweenInfo, {Scale = final})
+	else
+		self.Scale.Scale = final
+	end
+end
+
+-- Recalcule le facteur d'adaptation quand l'écran change (rotation d'un
+-- téléphone/tablette, redimensionnement de la fenêtre PC, etc.).
+function Library:_updateResponsiveScale()
+	self._responsiveScale = self:_computeResponsiveFactor()
+	self:_setAnimScale(self._animScale, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+end
+
+function Library:_setupResponsive()
+	local camera = workspace.CurrentCamera
+	if camera then
+		self._viewportConn = camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+			self:_updateResponsiveScale()
+		end)
+	end
+	-- Si la caméra change (respawn, etc.), on se raccroche à la nouvelle.
+	self._cameraConn = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+		if self._viewportConn then self._viewportConn:Disconnect() end
+		local newCamera = workspace.CurrentCamera
+		if newCamera then
+			self._viewportConn = newCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+				self:_updateResponsiveScale()
+			end)
+		end
+		self:_updateResponsiveScale()
+	end)
 end
 
 --============================================================
@@ -600,9 +670,11 @@ function Library:ToggleMinimize()
 end
 
 function Library:Close()
-	tween(self.Scale, TweenInfo.new(.28, Enum.EasingStyle.Quint), {Scale = .88})
+	self:_setAnimScale(.88, TweenInfo.new(.28, Enum.EasingStyle.Quint))
 	tween(self.Overlay, TweenInfo.new(.28), {BackgroundTransparency = 1})
 	task.wait(.3)
+	if self._viewportConn then self._viewportConn:Disconnect() end
+	if self._cameraConn then self._cameraConn:Disconnect() end
 	self.Gui:Destroy()
 end
 
